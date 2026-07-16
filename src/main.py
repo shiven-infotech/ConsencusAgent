@@ -1,144 +1,81 @@
-from IPython.core import compilerop
-from Utilities.llm_model import get_google_llm
-from typing import Literal, Optional, Annotated
-import operator
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from langchain_ollama import ChatOllama
-from Utilities.llm_model import get_llm
-import json
+import os
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
+from src.coach import (
+    generate_coaching_prompt,
+    evaluate_user_response,
+    GeneratedPrompt,
+    EvaluationResult
+)
 
-load_dotenv()
+app = FastAPI(title="Humor & Misinterpretation Coach API")
 
-# model: ChatOllama = get_google_llm()
-model: ChatOllama = get_llm(model="mistral-3:8b", temp=0)
+# Configure CORS for React frontend development server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Request/Response Schemas
 
-class StructuredItem(BaseModel):
-    movie: Optional[str] = None
-    director: Optional[str] = None
-    genre: Optional[str] = None
+class NextPromptRequest(BaseModel):
+    difficulty: str
+    category: str
+    history: List[str] = []
 
-    track: Optional[str] = None
-    artist: Optional[str] = None
-    album: Optional[str] = None
+class EvaluateRequest(BaseModel):
+    prompt_text: str
+    context_hint: str
+    user_response: str
+    allowed_styles: List[str] = []
 
+@app.post("/api/session/next", response_model=GeneratedPrompt)
+async def get_next_prompt(req: NextPromptRequest):
+    try:
+        # Standardize difficulty and category
+        difficulty = req.difficulty.lower().strip()
+        category = req.category.lower().strip()
+        if difficulty not in ["simple", "intermediate", "expert"]:
+            difficulty = "simple"
+        
+        prompt_data = generate_coaching_prompt(difficulty, category, req.history)
+        return prompt_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-class ItemList(BaseModel):
-    varities: list[StructuredItem]
+@app.post("/api/session/evaluate", response_model=EvaluationResult)
+async def evaluate_response(req: EvaluateRequest):
+    try:
+        if not req.prompt_text or not req.user_response:
+            raise HTTPException(status_code=400, detail="Prompt text and user response are required.")
+        
+        evaluation = evaluate_user_response(
+            prompt_text=req.prompt_text,
+            context_hint=req.context_hint,
+            user_response=req.user_response,
+            allowed_styles=req.allowed_styles
+        )
+        return evaluation
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+# Serve static frontend files if they exist
+frontend_dist_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+if os.path.exists(frontend_dist_path):
+    app.mount("/", StaticFiles(directory=frontend_dist_path, html=True), name="frontend")
+else:
+    @app.get("/")
+    async def index():
+        return {"status": "backend running", "message": "Frontend build not found. Run dev servers separately."}
 
-@tool
-def searchh_items():
-    """search tool"""
-    return [
-        {"track": "Shape of You G7"},
-        {"director": "Christopher Nolan X2"},
-        {"artist": "Ed Sheeran G7"},
-        {"movie": "Interstellar X2"},
-        {"genre": "Sci-Fi X2"},
-        {"album": "Divide G7"},
-        {"artist": "Adele M5"},
-        {"album": "25 M5"},
-        {"track": "Hello M5"},
-        {"genre": "Crime D9"},
-        {"movie": "The Godfather D9"},
-        {"director": "Francis Ford Coppola D9"},
-        {"weather": "Sunny"},
-        {"temperature": "30C"},
-        {"random": "Ignore me"},
-    ]
-
-
-tools_by_name = {
-    "searchh_items": searchh_items,
-}
-
-
-model_with_tools = model.bind_tools([searchh_items])
-model_with_structure = model.with_structured_output(ItemList)
-
-
-messages2 = [
-    SystemMessage(
-        content="You are a producer. You MUST call the tool to retrieve the list of items"
-    ),
-    HumanMessage(content="give me list"),
-]
-
-
-res = model_with_tools.invoke(messages2)
-
-tool_data = []
-
-print(res)
-if res.tool_calls:
-    messages2.append(res)
-    for tool_call in res.tool_calls:
-        print(f"Tool: {tool_call['name']}")
-        print(f"Args: {tool_call['args']}")
-        tool_result = tools_by_name[tool_call["name"]].invoke(tool_call)
-        tool_data.extend(json.loads(tool_result.content))
-
-
-formatting_prompt = [
-    SystemMessage(
-        content="""
-        You are given the output of a tool.
-
-Your task is to discover how the records are related and organize them into structured objects.
-
-Rules:
-
-1. Use ONLY the provided data.
-2. Do NOT use external knowledge.
-3. Do NOT invent, infer, or modify any value.
-4. Discover the hidden grouping relationship that exists in the data.
-5. Records belonging to the same logical group must be combined into exactly one object.
-6. Every field in an object MUST originate from the same group.
-7. Never copy or borrow a field from another group.
-8. If a field does not exist for a group, return null instead of guessing.
-9. Ignore records that cannot be associated with any group.
-10. Remove any grouping markers or metadata from the returned values if they are only used for grouping.
-11. Return ONLY the final structured output.
-12. Do NOT explain your reasoning.
-13. Do NOT include intermediate structures such as grouping_marker, items, fields, notes, markdown, or code fences.
-
-Before producing the final answer, internally perform these steps:
-
-- Identify every unique logical group.
-- Collect every record belonging to that group.
-- Verify each record belongs to only one group.
-- Verify no field has been copied from another group.
-- Create exactly one structured object for the completed group.
-- Repeat until every group has been processed.
-
-        """
-    ),
-    HumanMessage(content=json.dumps(tool_data, indent=2)),
-]
-
-print(tool_data)
-
-
-final_output = model.invoke(formatting_prompt)
-
-parser_prompt = [
-    SystemMessage(
-        content="""
-        return the list, don't assume predict values, use only recived data from the tool
-"""
-    ),
-    HumanMessage(content=final_output.content),
-]
-
-
-print(final_output.content)
-structured_output = model_with_structure.invoke(parser_prompt)
-
-
-# print("\n--- Final Structured Output ---")
-print(structured_output)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("src.main:app", host="127.0.0.1", port=8000, reload=True)
