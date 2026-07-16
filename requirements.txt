@@ -4,3 +4,4 @@ python-dotenv
 pydantic
 fastapi
 uvicorn
+pytelegrambotapi
