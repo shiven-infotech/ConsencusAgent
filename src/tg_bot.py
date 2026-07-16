@@ -128,6 +128,13 @@ def command_start(message):
     }
     send_difficulty_selection(chat_id)
 
+# Helper: Safe Callback Query Answer
+def safe_answer_callback(call_id, text=None, show_alert=False):
+    try:
+        bot.answer_callback_query(call_id, text=text, show_alert=show_alert)
+    except Exception:
+        pass
+
 # Callbacks
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
@@ -139,30 +146,30 @@ def handle_callbacks(call):
     if data.startswith("diff_"):
         diff = data.split("_")[1]
         state['difficulty'] = diff
-        bot.answer_callback_query(call.id, f"Difficulty set: {DIFF_LABELS.get(diff, diff)}")
+        safe_answer_callback(call.id, f"Difficulty set: {DIFF_LABELS.get(diff, diff)}")
         send_category_selection(chat_id)
 
     elif data.startswith("cat_"):
         cat = data.split("_")[1]
         state['category'] = cat
         state['history'] = []
-        bot.answer_callback_query(call.id, f"Category set: {CAT_LABELS.get(cat, cat)}")
+        safe_answer_callback(call.id, f"Category set: {CAT_LABELS.get(cat, cat)}")
         deliver_new_prompt(chat_id)
 
     elif data == "show_hints":
         hints = state.get('hints', [])
         if hints:
             alert_text = "💡 Hints (Literal vs Double Meaning):\n\n" + "\n\n".join(f"• {h}" for h in hints)
-            bot.answer_callback_query(call.id, text=alert_text, show_alert=True)
+            safe_answer_callback(call.id, text=alert_text, show_alert=True)
         else:
-            bot.answer_callback_query(call.id, text="No hints available for this round.")
+            safe_answer_callback(call.id, text="No hints available for this round.")
 
     elif data == "action_next":
-        bot.answer_callback_query(call.id, "Loading next scenario...")
+        safe_answer_callback(call.id, "Loading next scenario...")
         deliver_new_prompt(chat_id)
 
     elif data == "action_reset":
-        bot.answer_callback_query(call.id, "Resetting settings...")
+        safe_answer_callback(call.id, "Resetting settings...")
         send_difficulty_selection(chat_id)
 
 # Message handler (for user replies)
