@@ -2,15 +2,23 @@ import os
 import telebot
 from telebot import types
 from dotenv import load_dotenv
-from coach import generate_coaching_prompt, evaluate_user_response
+from src.coach import (
+    generate_simple_sentence,
+    evaluate_sentence_humor,
+    classify_and_answer_message,
+    analyze_custom_line
+)
 
 # Load environment variables
 env_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=env_path)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+IS_BOT_DUMMY = False
 if not BOT_TOKEN:
     print("WARNING: TELEGRAM_BOT_TOKEN is not set in src/.env! Please add it.")
+    BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"  # Dummy token to allow decorators to load
+    IS_BOT_DUMMY = True
 
 # Initialize bot client
 bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
@@ -19,114 +27,154 @@ bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
 # Schema: { chat_id: { 'difficulty': str, 'category': str, 'prompt': str, 'context_hint': str, 'hints': List[str], 'history': List[str], 'step': str } }
 user_states = {}
 
-CAT_LABELS = {
-    'everyday': 'Everyday Talk',
-    'text_message': 'Text Message',
-    'dating_app': 'Dating App',
-    'workplace': 'Workplace',
-    'headline': 'News Headline'
-}
-
-DIFF_LABELS = {
-    'simple': '🟢 Simple',
-    'intermediate': '🟡 Intermediate',
-    'expert': '🔴 Expert'
-}
-
-# Helper: Start difficulty selection
-def send_difficulty_selection(chat_id):
+# Helper: Send mode selection
+def send_mode_selection(chat_id):
     keyboard = types.InlineKeyboardMarkup()
     keyboard.row(
-        types.InlineKeyboardButton("🟢 Simple", callback_data="diff_simple"),
-        types.InlineKeyboardButton("🟡 Intermediate", callback_data="diff_intermediate")
-    )
-    keyboard.row(
-        types.InlineKeyboardButton("🔴 Expert", callback_data="diff_expert")
+        types.InlineKeyboardButton("📚 Training Mode", callback_data="mode_training"),
+        types.InlineKeyboardButton("📝 Test Mode", callback_data="mode_test")
     )
     
     welcome_text = (
-        "🧠 <b>Welcome to the Humor & Misinterpretation Coach!</b>\n\n"
-        "I am Coach Antigravity. I'll help you improve your conversational wit and ability to create funny misinterpretations in real conversations.\n\n"
-        "To get started, choose your training difficulty level:"
+        "🧠 <b>Welcome to your Wit, Banter & English Coach!</b>\n\n"
+        "Please choose a mode to start:\n\n"
+        "📚 <b>Training Mode</b>: Learn humor passively. I will show you a random sentence and immediately display witty replies and better phrasings.\n\n"
+        "📝 <b>Test Mode</b>: Practice active wit. I will give you a sentence, wait for your reply, and then evaluate it."
     )
     bot.send_message(chat_id, welcome_text, parse_mode="HTML", reply_markup=keyboard)
 
-# Helper: Start category selection
-def send_category_selection(chat_id):
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.row(
-        types.InlineKeyboardButton("💬 Everyday Talk", callback_data="cat_everyday"),
-        types.InlineKeyboardButton("📱 Text Message", callback_data="cat_text_message")
-    )
-    keyboard.row(
-        types.InlineKeyboardButton("🔥 Dating App", callback_data="cat_dating_app"),
-        types.InlineKeyboardButton("💼 Workplace", callback_data="cat_workplace")
-    )
-    keyboard.row(
-        types.InlineKeyboardButton("📰 News Headline", callback_data="cat_headline")
-    )
-    
-    bot.send_message(
-        chat_id, 
-        "Great! Now select a scenario category to practice:", 
-        reply_markup=keyboard
-    )
-
-# Helper: Deliver prompt
-def deliver_new_prompt(chat_id):
-    state = user_states.get(chat_id)
-    if not state:
-        send_difficulty_selection(chat_id)
-        return
-
+# Helper: Deliver Training slide
+def deliver_training_slide(chat_id):
+    state = user_states.setdefault(chat_id, {})
     bot.send_chat_action(chat_id, 'typing')
     
-    difficulty = state.get('difficulty', 'simple')
-    category = state.get('category', 'everyday')
     history = state.setdefault('history', [])
-
     try:
-        # Call Gemini prompt generation
-        prompt_data = generate_coaching_prompt(difficulty, category, history)
+        sentence = generate_simple_sentence(history)
+        state['history'].append(sentence)
+        if len(state['history']) > 30:
+            state['history'].pop(0)
+            
+        # Immediately run analysis
+        res = analyze_custom_line(sentence)
         
-        # Save to state
-        state['prompt'] = prompt_data.prompt
-        state['context_hint'] = prompt_data.context_hint
-        state['hints'] = prompt_data.possible_interpretations
-        state['step'] = 'waiting_for_reply'
-        state['history'].append(prompt_data.prompt)
+        # Format Interpretations
+        interp_text = f"💬 <b>TRAINING: \"{sentence}\"</b>\n\n💡 <b>Interpretations:</b>\n"
+        for interp in res.interpretations:
+            interp_text += f"• {interp}\n"
+            
+        # Format Funny Sayings
+        express_text = "\n🗣️ <b>Witty Ways to Say It:</b>\n"
+        for i, item in enumerate(res.funny_express, 1):
+            express_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+            
+        # Format Funny Replies
+        replies_text = "\n🔥 <b>Witty Replies:</b>\n"
+        for i, item in enumerate(res.funny_replies, 1):
+            replies_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+            
+        # Format Better versions
+        better_text = "\n💡 <b>Better Ways to Say It:</b>\n"
+        for alt in res.better_versions:
+            better_text += f"• <i>\"{alt}\"</i>\n"
 
-        # Form inline action buttons
+        full_response = f"{interp_text}{express_text}{replies_text}{better_text}"
+        
         keyboard = types.InlineKeyboardMarkup()
-        keyboard.row(types.InlineKeyboardButton("💡 Show Hints", callback_data="show_hints"))
-
-        # Send Prompt Box
-        prompt_header = CAT_LABELS.get(category, category.replace('_', ' ').capitalize())
-        prompt_text = (
-            f"🔔 <b>NEW SCENARIO ({prompt_header})</b>\n"
-            f"📍 <i>Context: {prompt_data.context_hint}</i>\n\n"
-            f"💬 <b>\"{prompt_data.prompt}\"</b>\n\n"
-            f"👉 Send your funny misinterpretation as a text message reply!"
+        keyboard.row(
+            types.InlineKeyboardButton("Next Prompt ⚡", callback_data="action_next"),
+            types.InlineKeyboardButton("Change Mode ⚙️", callback_data="action_reset")
         )
-        bot.send_message(chat_id, prompt_text, parse_mode="HTML", reply_markup=keyboard)
-
+        
+        bot.send_message(chat_id, full_response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Error generating prompt: {str(e)}\n\nTry sending /start to reset.")
+        bot.send_message(chat_id, f"⚠️ Error in Training: {str(e)}\n\nTry sending /start to reset.")
+
+# Helper: Deliver Test challenge
+def deliver_test_challenge(chat_id):
+    state = user_states.setdefault(chat_id, {})
+    bot.send_chat_action(chat_id, 'typing')
+    
+    history = state.setdefault('history', [])
+    try:
+        sentence = generate_simple_sentence(history)
+        state['prompt'] = sentence
+        state['step'] = 'waiting_for_reply'
+        state['history'].append(sentence)
+        if len(state['history']) > 30:
+            state['history'].pop(0)
+            
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.row(
+            types.InlineKeyboardButton("Skip Challenge ⏭️", callback_data="action_next"),
+            types.InlineKeyboardButton("Change Mode ⚙️", callback_data="action_reset")
+        )
+        
+        msg_text = (
+            f"📝 <b>TEST CHALLENGE</b>\n"
+            f"💬 <b>\"{sentence}\"</b>\n\n"
+            "👉 Send a funny misinterpretation or banter reply to this line!"
+        )
+        bot.send_message(chat_id, msg_text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Error in Test Challenge: {str(e)}\n\nTry sending /start to reset.")
 
 # Commands
 @bot.message_handler(commands=['start'])
 def command_start(message):
     chat_id = message.chat.id
     user_states[chat_id] = {
-        'difficulty': 'simple',
-        'category': 'everyday',
+        'mode': 'training',
         'prompt': '',
-        'context_hint': '',
-        'hints': [],
         'history': [],
-        'step': 'difficulty'
+        'step': ''
     }
-    send_difficulty_selection(chat_id)
+    send_mode_selection(chat_id)
+
+@bot.message_handler(commands=['humor', 'h', 'banter', 'bn', 'betterversion', 'bt'])
+def command_analyze(message):
+    chat_id = message.chat.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(chat_id, "Usage: /h <your sentence> or /bn <your sentence> or /bt <your sentence>")
+        return
+    line = parts[1]
+    process_custom_line_analysis(chat_id, line)
+
+# Helper: Custom Line Analysis Processor
+def process_custom_line_analysis(chat_id, line):
+    bot.send_chat_action(chat_id, 'typing')
+    try:
+        res = analyze_custom_line(line)
+        
+        # Format Interpretations
+        interp_text = f"💡 <b>Interpretations for: \"{line}\"</b>\n"
+        for interp in res.interpretations:
+            interp_text += f"• {interp}\n"
+            
+        # Format Funny Sayings
+        express_text = "\n🗣️ <b>Witty Ways to Say It:</b>\n"
+        for i, item in enumerate(res.funny_express, 1):
+            express_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+            
+        # Format Funny Replies
+        replies_text = "\n🔥 <b>Witty Replies:</b>\n"
+        for i, item in enumerate(res.funny_replies, 1):
+            replies_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+            
+        # Format Better versions
+        better_text = "\n💡 <b>Better Ways to Say It:</b>\n"
+        for alt in res.better_versions:
+            better_text += f"• <i>\"{alt}\"</i>\n"
+
+        full_response = f"{interp_text}{express_text}{replies_text}{better_text}"
+        
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.row(types.InlineKeyboardButton("Next ⚡", callback_data="action_next"))
+        
+        bot.send_message(chat_id, full_response, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Analysis failed: {str(e)}")
 
 # Helper: Safe Callback Query Answer
 def safe_answer_callback(call_id, text=None, show_alert=False):
@@ -140,88 +188,92 @@ def safe_answer_callback(call_id, text=None, show_alert=False):
 def handle_callbacks(call):
     chat_id = call.message.chat.id
     data = call.data
-    
     state = user_states.setdefault(chat_id, {})
-
-    if data.startswith("diff_"):
-        diff = data.split("_")[1]
-        state['difficulty'] = diff
-        safe_answer_callback(call.id, f"Difficulty set: {DIFF_LABELS.get(diff, diff)}")
-        send_category_selection(chat_id)
-
-    elif data.startswith("cat_"):
-        cat = data.split("_")[1]
-        state['category'] = cat
-        state['history'] = []
-        safe_answer_callback(call.id, f"Category set: {CAT_LABELS.get(cat, cat)}")
-        deliver_new_prompt(chat_id)
-
-    elif data == "show_hints":
-        hints = state.get('hints', [])
-        if hints:
-            alert_text = "💡 Hints (Literal vs Double Meaning):\n\n" + "\n\n".join(f"• {h}" for h in hints)
-            safe_answer_callback(call.id, text=alert_text, show_alert=True)
-        else:
-            safe_answer_callback(call.id, text="No hints available for this round.")
-
+    
+    if data == "mode_training":
+        state['mode'] = 'training'
+        safe_answer_callback(call.id, "Mode set: Training")
+        deliver_training_slide(chat_id)
+    elif data == "mode_test":
+        state['mode'] = 'test'
+        safe_answer_callback(call.id, "Mode set: Test")
+        deliver_test_challenge(chat_id)
     elif data == "action_next":
-        safe_answer_callback(call.id, "Loading next scenario...")
-        deliver_new_prompt(chat_id)
-
+        safe_answer_callback(call.id, "Loading next...")
+        if state.get('mode') == 'test':
+            deliver_test_challenge(chat_id)
+        else:
+            deliver_training_slide(chat_id)
     elif data == "action_reset":
-        safe_answer_callback(call.id, "Resetting settings...")
-        send_difficulty_selection(chat_id)
+        safe_answer_callback(call.id, "Resetting mode...")
+        send_mode_selection(chat_id)
 
-# Message handler (for user replies)
-@bot.message_handler(func=lambda msg: True)
+# Message handler (for user replies and questions)
+@bot.message_handler(func=lambda msg: not msg.text.startswith('/'))
 def handle_text_messages(message):
     chat_id = message.chat.id
-    state = user_states.get(chat_id)
+    state = user_states.setdefault(chat_id, {})
 
-    if not state or state.get('step') != 'waiting_for_reply':
-        # If user sends a message outside the game flow, greet them
-        send_difficulty_selection(chat_id)
+    # If the user is currently replying to a practice prompt sentence
+    if state.get('step') == 'waiting_for_reply' and state.get('prompt'):
+        user_reply = message.text
+        prompt_text = state.get('prompt')
+        bot.send_chat_action(chat_id, 'typing')
+
+        try:
+            eval_result = evaluate_sentence_humor(prompt_text, user_reply)
+
+            # Format Interpretations
+            interp_text = "💡 <b>Interpretations:</b>\n"
+            for interp in eval_result.interpretations:
+                interp_text += f"• {interp}\n"
+                
+            # Format Funny Sayings
+            express_text = "\n🗣️ <b>Witty Ways to Say It:</b>\n"
+            for i, item in enumerate(eval_result.funny_express, 1):
+                express_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+                
+            # Format Funny Replies
+            replies_text = "\n🔥 <b>Witty Replies:</b>\n"
+            for i, item in enumerate(eval_result.funny_replies, 1):
+                replies_text += f"{i}. <i>\"{item.text}\"</i> ({item.technique})\n"
+                
+            # Format Better versions
+            better_text = "\n💡 <b>Better Ways to Say It:</b>\n"
+            for alt in eval_result.better_versions:
+                better_text += f"• <i>\"{alt}\"</i>\n"
+
+            full_response = f"{interp_text}{express_text}{replies_text}{better_text}"
+
+            keyboard = types.InlineKeyboardMarkup()
+            keyboard.row(
+                types.InlineKeyboardButton("Next Challenge ⚡", callback_data="action_next"),
+                types.InlineKeyboardButton("Change Mode ⚙️", callback_data="action_reset")
+            )
+
+            bot.send_message(chat_id, full_response, parse_mode="HTML", reply_markup=keyboard)
+            state['step'] = 'completed'
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Evaluation failed: {str(e)}\n\nPlease try again.")
         return
 
-    user_reply = message.text
-    prompt_text = state.get('prompt')
-    context_hint = state.get('context_hint')
-
+    # If they send any other statement or ask a question
     bot.send_chat_action(chat_id, 'typing')
-
     try:
-        # Call Gemini evaluation
-        eval_result = evaluate_user_response(
-            prompt_text=prompt_text,
-            context_hint=context_hint,
-            user_response=user_reply
-        )
-
-        # Format alternative jokes
-        eval_text = "💡 <b>Alternative Angles</b>\n\n"
+        classification = classify_and_answer_message(message.text)
         
-        for alt in eval_result.alternatives:
-            eval_text += f"⚡ <b>{alt.style}</b>\n"
-            for i, example in enumerate(alt.examples, 1):
-                eval_text += f"{i}. <i>\"{example}\"</i>\n"
-            eval_text += "\n"
-
-        # Form inline action buttons
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.row(
-            types.InlineKeyboardButton("Next Scenario ⚡", callback_data="action_next"),
-            types.InlineKeyboardButton("Change Settings ⚙️", callback_data="action_reset")
-        )
-
-        # Send evaluation
-        bot.send_message(chat_id, eval_text, parse_mode="HTML", reply_markup=keyboard)
-        state['step'] = 'completed'
-
+        if classification.is_question:
+            # Answer question directly
+            bot.send_message(chat_id, classification.direct_answer)
+        else:
+            # Treat as custom line input and immediately output the analysis
+            process_custom_line_analysis(chat_id, message.text)
+            
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Evaluation failed: {str(e)}\n\nPlease try again.")
+        bot.send_message(chat_id, f"⚠️ Processing failed: {str(e)}")
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
+    if IS_BOT_DUMMY or not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
     else:
         print("Bot Antigravity is polling... Press Ctrl+C to stop.")

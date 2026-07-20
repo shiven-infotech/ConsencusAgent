@@ -1,5 +1,7 @@
 import os
+import threading
 from typing import List, Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,10 +12,31 @@ from src.coach import (
     generate_coaching_prompt,
     evaluate_user_response,
     GeneratedPrompt,
-    EvaluationResult
+    EvaluationResult,
+    analyze_convo_turn,
+    ConvoAnalysisResponse
 )
+from src.tg_bot import bot, IS_BOT_DUMMY
 
-app = FastAPI(title="Humor & Misinterpretation Coach API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Run Telegram Bot polling in a background thread if credentials are set
+    bot_thread = None
+    if bot and not IS_BOT_DUMMY:
+        print("Starting Telegram bot polling in a background thread...")
+        bot_thread = threading.Thread(target=bot.infinity_polling, daemon=True)
+        bot_thread.start()
+    else:
+        print("Telegram bot not starting (missing TELEGRAM_BOT_TOKEN).")
+    
+    yield
+    
+    # Shutdown: Stop polling if it was running
+    if bot and bot_thread:
+        print("Stopping Telegram bot polling...")
+        bot.stop_polling()
+
+app = FastAPI(title="Humor & Misinterpretation Coach API", lifespan=lifespan)
 
 # Configure CORS for React frontend development server
 app.add_middleware(
@@ -25,6 +48,13 @@ app.add_middleware(
 )
 
 # Request/Response Schemas
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ConvoReplyRequest(BaseModel):
+    history: List[ChatMessage]
 
 class NextPromptRequest(BaseModel):
     difficulty: str
@@ -64,6 +94,15 @@ async def evaluate_response(req: EvaluateRequest):
             allowed_styles=req.allowed_styles
         )
         return evaluation
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/convo/reply", response_model=ConvoAnalysisResponse)
+async def convo_reply(req: ConvoReplyRequest):
+    try:
+        history_dicts = [{"role": msg.role, "content": msg.content} for msg in req.history]
+        analysis = analyze_convo_turn(history_dicts)
+        return analysis
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

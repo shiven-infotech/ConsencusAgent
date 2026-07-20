@@ -5,11 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain-ollama>=1.1.0",
-    "langchain-google-genai",
-    "langchain",
+    "google-genai",
     "python-dotenv",
     "pydantic",
     "fastapi>=0.139.1",
     "uvicorn>=0.51.0",
+    "pytelegrambotapi",
 ]
